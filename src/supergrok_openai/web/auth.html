@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>控制面板验证 · SuperGrok OpenAI</title>
+    <link rel="stylesheet" href="/assets/auth.css">
+    <script defer src="/assets/auth.js"></script>
+  </head>
+  <body>
+    <main class="auth-shell">
+      <section class="identity" aria-labelledby="auth-title">
+        <div class="brand-mark" aria-hidden="true">SG</div>
+        <p class="eyebrow">PRIVATE LAN GATEWAY</p>
+        <h1 id="auth-title">保护你的<br><span>SuperGrok 网关</span></h1>
+        <p class="intro">控制面板包含 OAuth 登录和本地 API Key。首次访问请设置管理密码，之后局域网设备必须验证才能进入。</p>
+        <div class="security-note">
+          <strong>可信局域网模式</strong>
+          <p>当前连接使用 HTTP。不要把端口映射到公网，也不要在不可信 Wi-Fi 上输入密码。</p>
+        </div>
+      </section>
+
+      <section class="auth-card" aria-live="polite">
+        <div id="loading-view" class="loading-view">
+          <span class="spinner" aria-hidden="true"></span>
+          <p>正在检查控制面板状态…</p>
+        </div>
+
+        <form id="setup-form" class="hidden" novalidate>
+          <p class="step">FIRST RUN / SETUP</p>
+          <h2>设置管理密码</h2>
+          <p class="form-copy">这台设备是首次启动。密码只保存为 Argon2id 哈希，无法从配置文件还原。</p>
+
+          <label for="setup-password">新密码</label>
+          <div class="password-field">
+            <input id="setup-password" name="password" type="password" autocomplete="new-password" maxlength="1024" required autofocus>
+            <button class="reveal" data-reveal="setup-password" type="button">显示</button>
+          </div>
+
+          <ul class="requirements" aria-label="密码强度要求">
+            <li data-rule="length">至少 8 位</li>
+            <li data-rule="lowercase">包含小写字母</li>
+            <li data-rule="uppercase">包含大写字母</li>
+            <li data-rule="number">包含数字</li>
+          </ul>
+
+          <label for="setup-confirmation">再次输入</label>
+          <div class="password-field">
+            <input id="setup-confirmation" name="confirmation" type="password" autocomplete="new-password" maxlength="1024" required>
+            <button class="reveal" data-reveal="setup-confirmation" type="button">显示</button>
+          </div>
+          <p id="setup-error" class="form-error" role="alert"></p>
+          <button id="setup-submit" class="primary-action" type="submit">保存密码并进入</button>
+          <p class="microcopy">局域网首次设置采用“先到先得”；完成后其他设备只能进入登录页。</p>
+        </form>
+
+        <form id="login-form" class="hidden" novalidate>
+          <p class="step">DASHBOARD / SIGN IN</p>
+          <h2>验证管理密码</h2>
+          <p class="form-copy">登录会话保存在 HttpOnly Cookie 中，连续失败会暂时限制尝试。</p>
+          <label for="login-password">管理密码</label>
+          <div class="password-field">
+            <input id="login-password" name="password" type="password" autocomplete="current-password" maxlength="1024" required autofocus>
+            <button class="reveal" data-reveal="login-password" type="button">显示</button>
+          </div>
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button id="login-submit" class="primary-action" type="submit">进入控制面板</button>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>
