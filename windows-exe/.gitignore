@@ -1,0 +1,11 @@
+.build-venv/
+build/
+dist/
+!dist/
+!dist/SuperGrokGateway.exe
+*.spec.bak
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]

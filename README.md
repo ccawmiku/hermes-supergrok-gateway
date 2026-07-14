@@ -81,16 +81,22 @@ py -m venv .venv
 docker run -d --name hermes-supergrok-gateway `
   -p 8645:8645 `
   -v supergrok-data:/data `
-  ghcr.io/ccawmiku/hermes-supergrok-gateway:v1.0.0
+  ghcr.io/ccawmiku/hermes-supergrok-gateway:v1.0.1
 ```
 
-也可以使用仓库内固定到 `v1.0.0` 的 Compose 配置：
+也可以使用仓库内固定到 `v1.0.1` 的 Compose 配置：
 
 ```powershell
 docker compose up -d
 ```
 
 浏览器打开 `http://<Docker 主机局域网 IP>:8645/` 设置管理密码。OAuth 凭据、管理密码哈希和 Token 统计都保存在 `supergrok-data` 数据卷中。
+
+## Windows 单文件版
+
+无需安装 Python，直接运行仓库内的 `windows-exe/dist/SuperGrokGateway.exe`。该版本包含网页界面，不设置面板密码，其他登录、模型适配、OpenAI/Anthropic API 和 Token 统计功能与 Docker 版同步维护。只建议在可信的家庭或个人局域网中使用。
+
+每个 `v*.*.*` 版本标签都会重新构建 Windows EXE，并把 `SuperGrokGateway.exe` 附加到对应的 GitHub Release；仓库中也保留当前版本的 EXE。
 
 ## OpenAI API
 
@@ -106,11 +112,12 @@ API Key:  网页控制面板中显示的 sg-local-... 密钥
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `POST /v1/responses`
+- `POST /v1/responses/compact`
 - `POST /v1/completions`
 - `POST /v1/embeddings`
 - `POST /v1/messages`（Anthropic Messages 兼容层）
 
-流式 SSE、tools、JSON mode 等字段不做转换，直接由 xAI 上游决定是否支持。健康检查为 `GET /health`。
+网关会把 CCSwitch、Codex 和 Claude Code 使用的 `gpt-*`、`codex-*`、`claude-*` 模型名自动映射到 Hermes 的 SuperGrok 默认模型 `grok-build-0.1`。同时会清理 xAI 不接受的 Codex Responses 字段，以及工具 JSON Schema 中的 `pattern`、`format` 和含 `/` 的枚举。流式 SSE 与工具调用响应仍由 xAI 上游生成。健康检查为 `GET /health`。
 
 ## Claude / Anthropic API
 
@@ -132,7 +139,7 @@ message = client.messages.create(
 print(message.content[0].text)
 ```
 
-支持普通 Messages 响应、Anthropic SSE 事件流、`tool_use` / `tool_result`、图片内容块，以及 `x-api-key` 认证。模型参数仍需填写网页列出的 Grok 模型 ID，而不是 `claude-*` 模型名。
+支持普通 Messages 响应、Anthropic SSE 事件流、`tool_use` / `tool_result`、图片内容块，以及 `x-api-key` 认证。可以直接保留 Claude Code 的 `claude-*` 模型名，网关会自动映射到 `grok-build-0.1`；显式填写网页列出的 Grok 模型 ID 时则保持原模型不变。
 
 ## 模型目录和 Token 统计
 

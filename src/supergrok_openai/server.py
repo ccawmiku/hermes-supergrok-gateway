@@ -32,6 +32,7 @@ from .auth import AuthError, AuthManager, XAI_API_BASE_URL
 from .stats import UsageStats, usage_from_response_bytes
 from .store import auth_path, delete_state, load_state
 from .webauth import COOKIE_NAME, SESSION_TTL_SECONDS, WebAuthError, WebAuthManager
+from .xai_compat import Adaptation, adapt_xai_payload
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,23 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8645
 MAX_REQUEST_BYTES = 10_000_000
 ALLOWED_PATHS = frozenset(
-    {"/models", "/responses", "/chat/completions", "/completions", "/embeddings"}
+    {
+        "/models",
+        "/responses",
+        "/responses/compact",
+        "/chat/completions",
+        "/completions",
+        "/embeddings",
+    }
 )
 USAGE_PATHS = frozenset(
-    {"/responses", "/chat/completions", "/completions", "/embeddings"}
+    {
+        "/responses",
+        "/responses/compact",
+        "/chat/completions",
+        "/completions",
+        "/embeddings",
+    }
 )
 HERMES_XAI_FALLBACK_MODELS = [
     "grok-build-0.1",
@@ -108,6 +122,12 @@ def _bearer_from_request(request: web.Request) -> str:
     return str(
         request.headers.get("x-api-key") or request.headers.get("api-key") or ""
     ).strip()
+
+
+def _secure_equal(left: str, right: str) -> bool:
+    """Constant-time comparison that also handles non-ASCII client input."""
+
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
 def _validate_upstream(base_url: str, enforce_xai_origin: bool) -> str:
@@ -248,7 +268,7 @@ def create_app(
             raise web.HTTPFound("/auth")
         if request.path.startswith("/admin/api/"):
             supplied = request.headers.get("X-Admin-Token", "")
-            if not supplied or not hmac.compare_digest(supplied, admin_token):
+            if not supplied or not _secure_equal(supplied, admin_token):
                 return _admin_error(
                     403, "控制面板会话无效，请刷新页面", "admin_token_invalid"
                 )
@@ -637,13 +657,18 @@ def create_app(
         except Exception as exc:
             return _anthropic_response_error(401, str(exc))
         supplied = _bearer_from_request(request)
-        if not supplied or not hmac.compare_digest(supplied, expected):
+        if not supplied or not _secure_equal(supplied, expected):
             return _anthropic_response_error(401, "Invalid local API key")
         try:
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise AnthropicCompatError("request body must be a JSON object")
             converted = anthropic_to_openai(payload)
+            converted, _adaptation = adapt_xai_payload(
+                converted,
+                endpoint="/chat/completions",
+                available_models=model_catalog["models"],
+            )
         except (
             json.JSONDecodeError,
             AnthropicCompatError,
@@ -779,7 +804,7 @@ def create_app(
                 500, "Cannot read the local credential store", "credential_store_error"
             )
         supplied = _bearer_from_request(request)
-        if not supplied or not hmac.compare_digest(supplied, expected):
+        if not supplied or not _secure_equal(supplied, expected):
             return _error(401, "Invalid local API key", "invalid_api_key")
 
         rel_path = "/" + request.match_info.get("tail", "").strip("/")
@@ -789,6 +814,24 @@ def create_app(
             )
 
         body = await request.read()
+        adaptation = Adaptation("", "")
+        if request.method == "POST" and rel_path in {
+            "/responses",
+            "/responses/compact",
+            "/chat/completions",
+            "/completions",
+        }:
+            try:
+                request_payload = json.loads(body)
+                if isinstance(request_payload, dict):
+                    request_payload, adaptation = adapt_xai_payload(
+                        request_payload,
+                        endpoint=rel_path,
+                        available_models=model_catalog["models"],
+                    )
+                    body = json.dumps(request_payload, ensure_ascii=False).encode()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
         headers = _filter_request_headers(request.headers)
         try:
             upstream_response = await _upstream_request(
@@ -808,9 +851,15 @@ def create_app(
                 502, f"xAI upstream connection failed: {exc}", "upstream_unreachable"
             )
 
+        response_headers = _filter_response_headers(upstream_response.headers)
+        if adaptation.model_was_mapped:
+            response_headers["X-SuperGrok-Requested-Model"] = (
+                adaptation.requested_model
+            )
+            response_headers["X-SuperGrok-Upstream-Model"] = adaptation.upstream_model
         response = web.StreamResponse(
             status=upstream_response.status,
-            headers=_filter_response_headers(upstream_response.headers),
+            headers=response_headers,
         )
         upstream_status = upstream_response.status
         collected = bytearray()
@@ -826,6 +875,16 @@ def create_app(
             logger.debug("client disconnected while streaming xAI response")
         finally:
             upstream_response.release()
+            if upstream_status >= 400 and collected:
+                detail = bytes(collected[:4000]).decode("utf-8", errors="replace")
+                logger.warning(
+                    "xAI returned HTTP %s for /v1%s (model %s -> %s): %s",
+                    upstream_status,
+                    rel_path,
+                    adaptation.requested_model or "-",
+                    adaptation.upstream_model or "-",
+                    detail,
+                )
             if rel_path in USAGE_PATHS and upstream_status < 400:
                 try:
                     request_payload = json.loads(body) if body else {}

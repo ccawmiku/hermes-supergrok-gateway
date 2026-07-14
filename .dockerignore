@@ -13,3 +13,4 @@ build
 dist
 tests
 work
+windows-exe

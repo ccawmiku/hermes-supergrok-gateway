@@ -107,7 +107,7 @@ async def test_proxy_requires_local_key_and_replaces_authorization(
                     "Authorization": "Bearer local-secret",
                     "Cookie": "do-not-forward=1",
                 },
-                json={"model": "grok"},
+                json={"model": "claude-sonnet-5"},
             )
             assert allowed.status == 200
             assert await allowed.json() == {"object": "list", "data": []}
@@ -118,7 +118,23 @@ async def test_proxy_requires_local_key_and_replaces_authorization(
     assert auth.force_refreshes == 1
     assert seen["authorization"] == "Bearer upstream-fresh"
     assert seen["query"] == "trace=yes"
-    assert '"model": "grok"' in seen["body"]
+    assert '"model": "grok-build-0.1"' in seen["body"]
+
+
+async def test_non_ascii_api_key_is_rejected_without_server_error() -> None:
+    app = create_app(FakeAuth())
+    runner, url = await start(app)
+    try:
+        async with ClientSession() as client:
+            response = await client.post(
+                f"{url}/v1/chat/completions",
+                headers={"Authorization": "Bearer 登录后生成"},
+                json={"model": "grok-build-0.1", "messages": []},
+            )
+            assert response.status == 401
+            assert (await response.json())["error"]["code"] == "invalid_api_key"
+    finally:
+        await runner.cleanup()
 
 
 async def test_unknown_v1_path_is_rejected() -> None:
@@ -287,7 +303,7 @@ async def test_anthropic_messages_endpoint_translates_and_tracks_usage(
                     "anthropic-version": "2023-06-01",
                 },
                 json={
-                    "model": "grok-4.5",
+                    "model": "claude-sonnet-5",
                     "max_tokens": 128,
                     "system": "Be brief",
                     "messages": [{"role": "user", "content": "Hello"}],
@@ -300,6 +316,7 @@ async def test_anthropic_messages_endpoint_translates_and_tracks_usage(
         await upstream_runner.cleanup()
 
     assert seen["messages"][0] == {"role": "system", "content": "Be brief"}
+    assert seen["model"] == "grok-build-0.1"
     assert payload["type"] == "message"
     assert payload["content"] == [{"type": "text", "text": "Hello from Grok"}]
     assert payload["usage"] == {"input_tokens": 14, "output_tokens": 4}
