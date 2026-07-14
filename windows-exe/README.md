@@ -8,7 +8,7 @@
 - 导入 Hermes xAI OAuth 凭据
 - OpenAI 兼容 `/v1` API
 - Claude / Anthropic Messages `/v1/messages`
-- CCSwitch、Codex 与 Claude Code 模型名自动映射及 xAI 请求兼容处理
+- CCSwitch、Codex 与 Claude Code 模型名自动映射、Codex `custom` 工具双向转换及 xAI 请求兼容处理
 - 实时或 Hermes 回退模型列表
 - Token 与请求统计
 - 局域网访问

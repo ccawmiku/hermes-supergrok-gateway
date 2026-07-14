@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -30,6 +31,7 @@ class Adaptation:
     requested_model: str
     upstream_model: str
     removed_fields: tuple[str, ...] = ()
+    custom_tool_names: tuple[str, ...] = ()
 
     @property
     def model_was_mapped(self) -> bool:
@@ -105,9 +107,76 @@ def _sanitize_tools(tools: Any) -> Any:
     return sanitized_tools
 
 
-def _sanitize_responses_input(value: Any) -> Any:
+def _adapt_responses_custom_tools(tools: Any) -> tuple[Any, tuple[str, ...]]:
+    """Expose OpenAI freeform custom tools to xAI as string functions."""
+
+    if not isinstance(tools, list):
+        return tools, ()
+    adapted: list[Any] = []
+    custom_names: list[str] = []
+    for raw_tool in tools:
+        if not isinstance(raw_tool, dict) or raw_tool.get("type") != "custom":
+            adapted.append(raw_tool)
+            continue
+        name = str(raw_tool.get("name") or "").strip()
+        if not name:
+            # Preserve malformed input so the upstream error remains explicit.
+            adapted.append(raw_tool)
+            continue
+        description = str(raw_tool.get("description") or "").strip()
+        transport_note = (
+            'This freeform tool is transported through xAI as a function. '
+            'Put the complete raw tool input in the JSON string field "input".'
+        )
+        adapted.append(
+            {
+                "type": "function",
+                "name": name,
+                "description": f"{description}\n\n{transport_note}".strip(),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {
+                            "type": "string",
+                            "description": "Complete raw input for the freeform tool.",
+                        }
+                    },
+                    "required": ["input"],
+                    "additionalProperties": False,
+                },
+                "strict": False,
+            }
+        )
+        custom_names.append(name)
+    return adapted, tuple(dict.fromkeys(custom_names))
+
+
+def _custom_input_as_function_arguments(value: Any) -> str:
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps({"input": value}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _function_arguments_as_custom_input(value: Any) -> str:
+    if not isinstance(value, str):
+        if isinstance(value, dict) and "input" in value:
+            inner = value["input"]
+            return inner if isinstance(inner, str) else json.dumps(inner, ensure_ascii=False)
+        return json.dumps(value, ensure_ascii=False)
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+    if isinstance(decoded, dict) and "input" in decoded:
+        inner = decoded["input"]
+        return inner if isinstance(inner, str) else json.dumps(inner, ensure_ascii=False)
+    return value
+
+
+def _sanitize_responses_input(value: Any, custom_tool_names: Iterable[str]) -> Any:
     if not isinstance(value, list):
         return value
+    custom_names = set(custom_tool_names)
     output: list[Any] = []
     for raw_item in value:
         if not isinstance(raw_item, dict):
@@ -119,8 +188,76 @@ def _sanitize_responses_input(value: Any) -> Any:
             # It cannot be replayed after switching a CCSwitch session to xAI.
             continue
         item.pop("_issuer_kind", None)
+        if item.get("type") == "custom_tool_call" and item.get("name") in custom_names:
+            item["type"] = "function_call"
+            item["arguments"] = _custom_input_as_function_arguments(item.pop("input", ""))
+            item.pop("namespace", None)
+        elif item.get("type") == "custom_tool_call_output":
+            item["type"] = "function_call_output"
+            item.pop("name", None)
         output.append(item)
     return output
+
+
+def _transform_custom_output_item(
+    item: Any, custom_tool_names: Iterable[str]
+) -> Any:
+    if not isinstance(item, dict):
+        return item
+    custom_names = set(custom_tool_names)
+    if item.get("type") != "function_call" or item.get("name") not in custom_names:
+        return item
+    transformed = copy.deepcopy(item)
+    transformed["type"] = "custom_tool_call"
+    transformed["input"] = _function_arguments_as_custom_input(
+        transformed.pop("arguments", "")
+    )
+    return transformed
+
+
+def transform_xai_response_payload(
+    payload: Any, custom_tool_names: Iterable[str]
+) -> Any:
+    """Turn xAI function calls back into the custom calls Codex registered."""
+
+    if not isinstance(payload, dict):
+        return payload
+    transformed = copy.deepcopy(payload)
+    if isinstance(transformed.get("item"), dict):
+        transformed["item"] = _transform_custom_output_item(
+            transformed["item"], custom_tool_names
+        )
+    for container in (transformed, transformed.get("response")):
+        if not isinstance(container, dict) or not isinstance(container.get("output"), list):
+            continue
+        container["output"] = [
+            _transform_custom_output_item(item, custom_tool_names)
+            for item in container["output"]
+        ]
+    return transformed
+
+
+def transform_xai_sse_line(line: bytes, custom_tool_names: Iterable[str]) -> bytes:
+    """Rewrite one SSE data line while preserving its original line ending."""
+
+    stripped = line.rstrip(b"\r\n")
+    ending = line[len(stripped) :]
+    if not stripped.startswith(b"data:"):
+        return line
+    raw_data = stripped[5:].lstrip()
+    if not raw_data or raw_data == b"[DONE]":
+        return line
+    try:
+        payload = json.loads(raw_data)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return line
+    transformed = transform_xai_response_payload(payload, custom_tool_names)
+    if transformed == payload:
+        return line
+    encoded = json.dumps(
+        transformed, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return b"data: " + encoded + ending
 
 
 def adapt_xai_payload(
@@ -138,10 +275,32 @@ def adapt_xai_payload(
         adapted["model"] = upstream_model
 
     removed: list[str] = []
+    custom_tool_names: tuple[str, ...] = ()
     if "tools" in adapted:
         adapted["tools"] = _sanitize_tools(adapted["tools"])
 
     if endpoint.startswith("/responses"):
+        if "tools" in adapted:
+            adapted["tools"], custom_tool_names = _adapt_responses_custom_tools(
+                adapted["tools"]
+            )
+            if custom_tool_names:
+                removed.append("tools.custom")
+        if isinstance(adapted.get("input"), list):
+            history_names = (
+                str(item.get("name") or "").strip()
+                for item in adapted["input"]
+                if isinstance(item, dict) and item.get("type") == "custom_tool_call"
+            )
+            custom_tool_names = tuple(
+                dict.fromkeys((*custom_tool_names, *(name for name in history_names if name)))
+            )
+        tool_choice = adapted.get("tool_choice")
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "custom":
+            tool_choice = dict(tool_choice)
+            tool_choice["type"] = "function"
+            adapted["tool_choice"] = tool_choice
+
         for field in ("client_metadata", "stream_options"):
             if field in adapted:
                 adapted.pop(field, None)
@@ -179,7 +338,9 @@ def adapt_xai_payload(
 
         if "input" in adapted:
             original_input = adapted["input"]
-            adapted["input"] = _sanitize_responses_input(original_input)
+            adapted["input"] = _sanitize_responses_input(
+                original_input, custom_tool_names
+            )
             if adapted["input"] != original_input:
                 removed.append("input.encrypted_reasoning")
 
@@ -187,4 +348,5 @@ def adapt_xai_payload(
         requested_model=requested_model,
         upstream_model=upstream_model,
         removed_fields=tuple(removed),
+        custom_tool_names=custom_tool_names,
     )

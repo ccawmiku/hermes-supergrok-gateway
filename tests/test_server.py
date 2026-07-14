@@ -137,6 +137,82 @@ async def test_non_ascii_api_key_is_rejected_without_server_error() -> None:
         await runner.cleanup()
 
 
+async def test_responses_custom_tool_is_bridged_through_stream() -> None:
+    seen: dict[str, object] = {}
+    patch = "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch"
+
+    async def upstream(request: web.Request) -> web.Response:
+        seen.update(await request.json())
+        item = {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_1",
+            "name": "apply_patch",
+            "arguments": json.dumps({"input": patch}),
+            "status": "completed",
+        }
+        events = [
+            {"type": "response.output_item.added", "item": {**item, "arguments": ""}},
+            {"type": "response.output_item.done", "item": item},
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_1", "output": [item]},
+            },
+        ]
+        body = "".join(
+            f"data: {json.dumps(event)}\n\n" for event in events
+        ) + "data: [DONE]\n\n"
+        return web.Response(text=body, content_type="text/event-stream")
+
+    upstream_app = web.Application()
+    upstream_app.router.add_post("/v1/responses", upstream)
+    upstream_runner, upstream_url = await start(upstream_app)
+    proxy_app = create_app(
+        FakeAuth(), upstream_base_url=f"{upstream_url}/v1", enforce_xai_origin=False
+    )
+    proxy_runner, proxy_url = await start(proxy_app)
+    try:
+        async with ClientSession() as client:
+            response = await client.post(
+                f"{proxy_url}/v1/responses",
+                headers={"Authorization": "Bearer local-secret"},
+                json={
+                    "model": "gpt-5.6-codex",
+                    "stream": True,
+                    "input": [{"role": "user", "content": "edit a file"}],
+                    "tools": [
+                        {
+                            "type": "custom",
+                            "name": "apply_patch",
+                            "description": "Apply a raw patch.",
+                            "format": {
+                                "type": "grammar",
+                                "syntax": "lark",
+                                "definition": "start: PATCH",
+                            },
+                        }
+                    ],
+                },
+            )
+            assert response.status == 200
+            events = [
+                json.loads(line[6:])
+                for line in (await response.text()).splitlines()
+                if line.startswith("data: {")
+            ]
+    finally:
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+
+    assert seen["tools"][0]["type"] == "function"
+    assert seen["tools"][0]["parameters"]["required"] == ["input"]
+    added, done, completed = events
+    assert added["item"]["type"] == "custom_tool_call"
+    assert done["item"]["type"] == "custom_tool_call"
+    assert done["item"]["input"] == patch
+    assert completed["response"]["output"][0]["type"] == "custom_tool_call"
+
+
 async def test_unknown_v1_path_is_rejected() -> None:
     auth = FakeAuth()
     app = create_app(auth)

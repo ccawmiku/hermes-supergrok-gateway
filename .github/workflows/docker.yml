@@ -55,6 +55,33 @@ jobs:
       - name: Build Windows executable
         working-directory: windows-exe
         run: python -m PyInstaller --noconfirm --clean SuperGrokGateway.spec
+      - name: Smoke test Windows executable
+        shell: pwsh
+        run: |
+          $env:SUPERGROK_OPENAI_HOME = Join-Path $env:RUNNER_TEMP "supergrok-smoke"
+          $exe = Join-Path $PWD "windows-exe/dist/SuperGrokGateway.exe"
+          Start-Process -FilePath $exe -ArgumentList "--host","127.0.0.1","--port","8775","--no-browser" -WindowStyle Hidden
+          try {
+            $healthy = $false
+            for ($attempt = 1; $attempt -le 40; $attempt++) {
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:8775/health" -TimeoutSec 2
+                if ($health.status -eq "ok") {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+                Start-Sleep -Milliseconds 500
+              }
+            }
+            if (-not $healthy) { throw "Windows executable did not become healthy" }
+            $page = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:8775/" -TimeoutSec 5
+            if ($page.StatusCode -ne 200 -or $page.Content -notmatch "SuperGrok OpenAI") {
+              throw "Embedded dashboard smoke test failed"
+            }
+          } finally {
+            Get-Process SuperGrokGateway -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v6
         with:

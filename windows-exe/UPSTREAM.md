@@ -16,4 +16,9 @@ This project is a clean, small extraction rather than a copy of the Hermes packa
 | `agent/chat_completion_helpers.py` xAI tool-schema restrictions | `src/supergrok_openai/xai_compat.py` |
 | `agent/codex_responses_adapter.py` cross-provider Responses handling | `src/supergrok_openai/xai_compat.py` |
 
+Codex custom-tool wire compatibility was verified against the official
+`openai/codex` repository at commit `4aa950d456c6`, specifically its freeform
+`apply_patch` tool definition, Responses event models, and tool router. No Codex
+source code is copied into this project.
+
 Deliberately excluded: Agent runtime, tools, skills, memory, gateways, dashboard, cron, credential pools, fallback providers, Nous auth, model configuration, and all non-xAI integrations.

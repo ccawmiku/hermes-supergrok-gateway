@@ -32,7 +32,12 @@ from .auth import AuthError, AuthManager, XAI_API_BASE_URL
 from .stats import UsageStats, usage_from_response_bytes
 from .store import auth_path, delete_state, load_state
 from .webauth import COOKIE_NAME, SESSION_TTL_SECONDS, WebAuthError, WebAuthManager
-from .xai_compat import Adaptation, adapt_xai_payload
+from .xai_compat import (
+    Adaptation,
+    adapt_xai_payload,
+    transform_xai_response_payload,
+    transform_xai_sse_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -864,13 +869,39 @@ def create_app(
         upstream_status = upstream_response.status
         collected = bytearray()
         await response.prepare(request)
+
+        async def write_chunk(chunk: bytes) -> None:
+            if not chunk:
+                return
+            if len(collected) < 4_000_000:
+                remaining = 4_000_000 - len(collected)
+                collected.extend(chunk[:remaining])
+            await response.write(chunk)
+
         try:
-            async for chunk in upstream_response.content.iter_any():
-                if chunk:
-                    if len(collected) < 4_000_000:
-                        remaining = 4_000_000 - len(collected)
-                        collected.extend(chunk[:remaining])
-                    await response.write(chunk)
+            content_type = upstream_response.headers.get("Content-Type", "").lower()
+            if adaptation.custom_tool_names and "text/event-stream" in content_type:
+                async for line in upstream_response.content:
+                    await write_chunk(
+                        transform_xai_sse_line(line, adaptation.custom_tool_names)
+                    )
+            elif adaptation.custom_tool_names:
+                upstream_body = await upstream_response.read()
+                transformed_body = upstream_body
+                try:
+                    upstream_payload = json.loads(upstream_body)
+                    transformed_payload = transform_xai_response_payload(
+                        upstream_payload, adaptation.custom_tool_names
+                    )
+                    transformed_body = json.dumps(
+                        transformed_payload, ensure_ascii=False, separators=(",", ":")
+                    ).encode("utf-8")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+                await write_chunk(transformed_body)
+            else:
+                async for chunk in upstream_response.content.iter_any():
+                    await write_chunk(chunk)
         except (ConnectionResetError, aiohttp.ClientError, asyncio.CancelledError):
             logger.debug("client disconnected while streaming xAI response")
         finally:
