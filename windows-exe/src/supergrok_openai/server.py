@@ -33,9 +33,9 @@ from .stats import UsageStats, usage_from_response_bytes
 from .store import auth_path, delete_state, load_state
 from .xai_compat import (
     Adaptation,
+    XaiSseTransformer,
     adapt_xai_payload,
     transform_xai_response_payload,
-    transform_xai_sse_line,
 )
 
 logger = logging.getLogger(__name__)
@@ -746,18 +746,20 @@ def create_app(
 
         try:
             content_type = upstream_response.headers.get("Content-Type", "").lower()
-            if adaptation.custom_tool_names and "text/event-stream" in content_type:
+            if (
+                adaptation.tool_bridge.requires_response_rewrite
+                and "text/event-stream" in content_type
+            ):
+                transformer = XaiSseTransformer(adaptation.tool_bridge)
                 async for line in upstream_response.content:
-                    await write_chunk(
-                        transform_xai_sse_line(line, adaptation.custom_tool_names)
-                    )
-            elif adaptation.custom_tool_names:
+                    await write_chunk(transformer.transform_line(line))
+            elif adaptation.tool_bridge.requires_response_rewrite:
                 upstream_body = await upstream_response.read()
                 transformed_body = upstream_body
                 try:
                     upstream_payload = json.loads(upstream_body)
                     transformed_payload = transform_xai_response_payload(
-                        upstream_payload, adaptation.custom_tool_names
+                        upstream_payload, adaptation.tool_bridge
                     )
                     transformed_body = json.dumps(
                         transformed_payload, ensure_ascii=False, separators=(",", ":")

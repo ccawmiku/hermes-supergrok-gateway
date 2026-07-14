@@ -81,10 +81,10 @@ py -m venv .venv
 docker run -d --name hermes-supergrok-gateway `
   -p 8645:8645 `
   -v supergrok-data:/data `
-  ghcr.io/ccawmiku/hermes-supergrok-gateway:v1.0.2
+  ghcr.io/ccawmiku/hermes-supergrok-gateway:v1.0.3
 ```
 
-也可以使用仓库内固定到 `v1.0.2` 的 Compose 配置：
+也可以使用仓库内固定到 `v1.0.3` 的 Compose 配置：
 
 ```powershell
 docker compose up -d
@@ -117,7 +117,7 @@ API Key:  网页控制面板中显示的 sg-local-... 密钥
 - `POST /v1/embeddings`
 - `POST /v1/messages`（Anthropic Messages 兼容层）
 
-网关会把 CCSwitch、Codex 和 Claude Code 使用的 `gpt-*`、`codex-*`、`claude-*` 模型名自动映射到 Hermes 的 SuperGrok 默认模型 `grok-build-0.1`。同时会清理 xAI 不接受的 Codex Responses 字段，以及工具 JSON Schema 中的 `pattern`、`format` 和含 `/` 的枚举。Codex 的 `custom` 自定义工具（包括 `apply_patch`）会双向转换为 xAI 支持的函数工具，工具调用结果再还原成 Codex 所需的事件格式。健康检查为 `GET /health`。
+网关会把 CCSwitch、Codex 和 Claude Code 使用的 `gpt-*`、`codex-*`、`claude-*` 模型名自动映射到 Hermes 的 SuperGrok 默认模型 `grok-build-0.1`。同时会清理 xAI 不接受的 Codex Responses 字段，以及工具 JSON Schema 中的 `pattern`、`format` 和含 `/` 的枚举。Codex 的 `custom`（包括 `apply_patch`）、`namespace`、`tool_search`、延迟加载工具和对应历史记录会在发往 xAI 时统一转换为函数工具，并在响应与 SSE 中恢复成 Codex 的标准事件；外部 `/v1/responses` 语义不变。健康检查为 `GET /health`。
 
 ## Claude / Anthropic API
 

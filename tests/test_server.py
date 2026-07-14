@@ -213,6 +213,106 @@ async def test_responses_custom_tool_is_bridged_through_stream() -> None:
     assert completed["response"]["output"][0]["type"] == "custom_tool_call"
 
 
+async def test_responses_namespace_and_tool_search_are_restored_through_stream() -> None:
+    seen: dict[str, object] = {}
+
+    async def upstream(request: web.Request) -> web.Response:
+        seen.update(await request.json())
+        namespace_item = {
+            "type": "function_call",
+            "id": "fc_ns",
+            "call_id": "call_ns",
+            "name": "collaboration__spawn_agent",
+            "arguments": '{"task":"review"}',
+            "status": "completed",
+        }
+        search_item = {
+            "type": "function_call",
+            "id": "fc_search",
+            "call_id": "call_search",
+            "name": "tool_search",
+            "arguments": '{"query":"browser","limit":"2"}',
+            "status": "completed",
+        }
+        events = [
+            {"type": "response.output_item.done", "item": namespace_item},
+            {
+                "type": "response.output_item.added",
+                "item": {**search_item, "arguments": ""},
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_search",
+                "call_id": "call_search",
+                "delta": '{"query":"browser"',
+            },
+            {"type": "response.output_item.done", "item": search_item},
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_1", "output": [namespace_item, search_item]},
+            },
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        return web.Response(text=body + "data: [DONE]\n\n", content_type="text/event-stream")
+
+    upstream_app = web.Application()
+    upstream_app.router.add_post("/v1/responses", upstream)
+    upstream_runner, upstream_url = await start(upstream_app)
+    proxy_app = create_app(
+        FakeAuth(), upstream_base_url=f"{upstream_url}/v1", enforce_xai_origin=False
+    )
+    proxy_runner, proxy_url = await start(proxy_app)
+    try:
+        async with ClientSession() as client:
+            response = await client.post(
+                f"{proxy_url}/v1/responses",
+                headers={"Authorization": "Bearer local-secret"},
+                json={
+                    "model": "gpt-5.6-codex",
+                    "stream": True,
+                    "input": "delegate",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "collaboration",
+                            "tools": [
+                                {
+                                    "type": "function",
+                                    "name": "spawn_agent",
+                                    "parameters": {"type": "object"},
+                                }
+                            ],
+                        },
+                        {"type": "tool_search"},
+                    ],
+                },
+            )
+            assert response.status == 200
+            events = [
+                json.loads(line[6:])
+                for line in (await response.text()).splitlines()
+                if line.startswith("data: {")
+            ]
+    finally:
+        await proxy_runner.cleanup()
+        await upstream_runner.cleanup()
+
+    assert {tool["type"] for tool in seen["tools"]} == {"function"}
+    assert {tool["name"] for tool in seen["tools"]} == {
+        "collaboration__spawn_agent",
+        "tool_search",
+    }
+    assert all(event["type"] != "response.function_call_arguments.delta" for event in events)
+    assert events[0]["item"]["namespace"] == "collaboration"
+    assert events[0]["item"]["name"] == "spawn_agent"
+    assert events[1]["item"]["type"] == "tool_search_call"
+    assert events[2]["item"]["type"] == "tool_search_call"
+    assert events[2]["item"]["arguments"] == {"query": "browser", "limit": 2}
+    completed = events[3]["response"]["output"]
+    assert completed[0]["namespace"] == "collaboration"
+    assert completed[1]["type"] == "tool_search_call"
+
+
 async def test_unknown_v1_path_is_rejected() -> None:
     auth = FakeAuth()
     app = create_app(auth)
