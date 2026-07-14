@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "supergrok-openai-windows"
-version = "1.0.3"
+version = "1.0.4"
 description = "Password-free Windows portable SuperGrok gateway with embedded web UI"
 readme = "README.md"
 requires-python = ">=3.10"

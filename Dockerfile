@@ -3,7 +3,7 @@ FROM python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a42
 LABEL org.opencontainers.image.source="https://github.com/ccawmiku/hermes-supergrok-gateway"
 LABEL org.opencontainers.image.description="Password-protected SuperGrok OAuth gateway for OpenAI and Anthropic clients"
 LABEL org.opencontainers.image.licenses="MIT"
-LABEL org.opencontainers.image.version="1.0.0"
+LABEL org.opencontainers.image.version="1.0.4"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

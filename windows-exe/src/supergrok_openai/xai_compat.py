@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
@@ -30,6 +31,9 @@ _XAI_RESPONSE_TOOL_TYPES = frozenset(
         "mcp",
         "shell",
     }
+)
+_XAI_NO_REASONING_EFFORT_MODELS = frozenset(
+    {"grok-build-0.1", "grok-composer-2.5-fast"}
 )
 
 
@@ -308,9 +312,13 @@ def _adapt_codex_tools(
                 seen_wire_names.add("tool_search")
             tool_search = True
             continue
-        if tool_type == "web_search_preview":
-            tool["type"] = "web_search"
-            adapted.append(tool)
+        if tool_type in {"web_search", "web_search_preview"}:
+            # Codex adds OpenAI-hosted search controls such as
+            # external_web_access, indexed_web_access, and content_types.
+            # xAI's Responses dialect supports the web_search tool itself but
+            # rejects those OpenAI-only fields, so rebuild the tool instead of
+            # passing an apparently supported type through verbatim.
+            adapted.append({"type": "web_search"})
             continue
         if tool_type in _XAI_RESPONSE_TOOL_TYPES:
             if isinstance(tool.get("parameters"), dict):
@@ -371,6 +379,64 @@ def _json_arguments(value: Any) -> str:
     return json.dumps(value if isinstance(value, dict) else {}, ensure_ascii=False)
 
 
+def _normalize_integral_json_numbers(value: Any) -> Any:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, list):
+        return [_normalize_integral_json_numbers(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _normalize_integral_json_numbers(child)
+            for key, child in value.items()
+        }
+    return value
+
+
+def _has_integral_json_float(value: Any) -> bool:
+    if isinstance(value, float):
+        return value.is_integer()
+    if isinstance(value, list):
+        return any(_has_integral_json_float(item) for item in value)
+    if isinstance(value, dict):
+        return any(_has_integral_json_float(item) for item in value.values())
+    return False
+
+
+def _normalize_function_arguments(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+    if not _has_integral_json_float(decoded):
+        return value
+    normalized = _normalize_integral_json_numbers(decoded)
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
+def _sanitize_input_content_parts(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+    sanitized: list[Any] = []
+    for raw_part in value:
+        if not isinstance(raw_part, dict) or raw_part.get("type") != "encrypted_content":
+            sanitized.append(raw_part)
+            continue
+        payload = raw_part.get("encrypted_content")
+        looks_encrypted = isinstance(payload, str) and len(payload) >= 64 and bool(
+            re.fullmatch(r"[A-Za-z0-9+/=_-]+", payload)
+        )
+        if looks_encrypted:
+            sanitized.append(raw_part)
+        elif isinstance(payload, str):
+            # Codex multi-agent transport places plaintext spawn messages in
+            # this slot and expects an OpenAI backend to encrypt it. xAI sees
+            # the pre-encryption form, so restore its real text semantics.
+            sanitized.append({"type": "input_text", "text": payload})
+    return sanitized
+
+
 def _tool_search_result(tools: Any) -> str:
     wire_names: list[str] = []
     if isinstance(tools, list):
@@ -398,10 +464,18 @@ def _sanitize_responses_input(value: Any, bridge: CodexToolBridge) -> Any:
             continue
         item = copy.deepcopy(raw_item)
         item_type = item.get("type")
-        if item_type == "reasoning" and item.get("encrypted_content"):
-            # Provider-encrypted reasoning cannot be replayed after switching to xAI.
+        if "content" in item:
+            item["content"] = _sanitize_input_content_parts(item["content"])
+        if item_type == "reasoning":
+            # Codex replays reasoning output items in the next request. xAI's
+            # stateless ModelInput parser rejects those replay items (including
+            # the summary-only item emitted by grok-build-0.1 itself). The
+            # messages and paired tool calls carry the usable conversation
+            # state, so omit reasoning items from full-history replays.
             continue
         item.pop("_issuer_kind", None)
+        if item_type == "function_call" and "arguments" in item:
+            item["arguments"] = _normalize_function_arguments(item["arguments"])
         if item_type == "additional_tools":
             continue
         if item_type == "function_call" and item.get("namespace"):
@@ -423,6 +497,13 @@ def _sanitize_responses_input(value: Any, bridge: CodexToolBridge) -> Any:
             item["type"] = "function_call_output"
             item["output"] = _tool_search_result(item.pop("tools", []))
             item.pop("status", None)
+        elif item_type == "agent_message":
+            # Multi-agent v2 delivers a child's reply as a Codex-only history
+            # item. Preserve its content as ordinary user context for xAI.
+            item["type"] = "message"
+            item["role"] = "user"
+            item.pop("author", None)
+            item.pop("recipient", None)
         output.append(item)
     return output
 
@@ -497,6 +578,10 @@ def _transform_output_item(item: Any, bridge: CodexToolBridge) -> Any:
         return item
     name = str(item.get("name") or "")
     transformed = copy.deepcopy(item)
+    if "arguments" in transformed:
+        transformed["arguments"] = _normalize_function_arguments(
+            transformed["arguments"]
+        )
     if name in set(bridge.custom_tool_names):
         transformed["type"] = "custom_tool_call"
         transformed["input"] = _function_arguments_as_custom_input(
@@ -524,6 +609,11 @@ def transform_xai_response_payload(payload: Any, bridge: CodexToolBridge) -> Any
     if not isinstance(payload, dict):
         return payload
     transformed = copy.deepcopy(payload)
+    if transformed.get("type") == "response.function_call_arguments.done":
+        if "arguments" in transformed:
+            transformed["arguments"] = _normalize_function_arguments(
+                transformed["arguments"]
+            )
     if isinstance(transformed.get("item"), dict):
         transformed["item"] = _transform_output_item(transformed["item"], bridge)
     for container in (transformed, transformed.get("response")):
@@ -656,14 +746,20 @@ def adapt_xai_payload(
             removed.append("text.verbosity")
 
         reasoning = adapted.get("reasoning")
-        if isinstance(reasoning, dict) and "context" in reasoning:
-            reasoning = dict(reasoning)
-            reasoning.pop("context", None)
-            if reasoning:
-                adapted["reasoning"] = reasoning
-            else:
+        if isinstance(reasoning, dict):
+            if upstream_model in _XAI_NO_REASONING_EFFORT_MODELS:
                 adapted.pop("reasoning", None)
-            removed.append("reasoning.context")
+                removed.append("reasoning")
+            else:
+                # xAI documents only the effort selector for supported models.
+                # Codex also sends OpenAI-only summary/context controls.
+                effort = reasoning.get("effort")
+                if effort in {"none", "low", "medium", "high", "xhigh"}:
+                    adapted["reasoning"] = {"effort": effort}
+                else:
+                    adapted.pop("reasoning", None)
+                if adapted.get("reasoning") != reasoning:
+                    removed.append("reasoning.unsupported")
 
         if "input" in adapted:
             original_input = adapted["input"]

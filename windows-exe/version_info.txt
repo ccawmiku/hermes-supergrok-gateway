@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'Local personal build'),
           StringStruct('FileDescription', 'SuperGrok OpenAI and Claude LAN Gateway'),
-          StringStruct('FileVersion', '1.0.3'),
+          StringStruct('FileVersion', '1.0.4'),
           StringStruct('InternalName', 'SuperGrokGateway'),
           StringStruct('LegalCopyright', 'Copyright 2025 Nous Research; 2026 contributors'),
           StringStruct('OriginalFilename', 'SuperGrokGateway.exe'),
           StringStruct('ProductName', 'SuperGrok Gateway Windows Portable'),
-          StringStruct('ProductVersion', '1.0.3'),
+          StringStruct('ProductVersion', '1.0.4'),
         ],
       )
     ]),

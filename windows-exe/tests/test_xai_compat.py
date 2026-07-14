@@ -31,6 +31,12 @@ def test_codex_responses_payload_is_sanitized_for_xai() -> None:
                     "encrypted_content": "sealed-by-openai",
                     "_issuer_kind": "openai_responses",
                 },
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "private"}],
+                    "content": None,
+                    "encrypted_content": None,
+                },
             ],
             "tools": [
                 {
@@ -64,7 +70,7 @@ def test_codex_responses_payload_is_sanitized_for_xai() -> None:
     assert payload["input"] == [{"role": "user", "content": "hello"}]
     assert "include" not in payload
     assert "text" not in payload
-    assert payload["reasoning"] == {"effort": "high"}
+    assert "reasoning" not in payload
     assert "client_metadata" not in payload
     assert "stream_options" not in payload
     tool = payload["tools"][0]
@@ -75,6 +81,23 @@ def test_codex_responses_payload_is_sanitized_for_xai() -> None:
     assert "pattern" not in model_schema
     assert "enum" not in model_schema
     assert adaptation.model_was_mapped is True
+
+
+def test_reasoning_effort_is_kept_only_for_models_that_support_it() -> None:
+    payload, _ = adapt_xai_payload(
+        {
+            "model": "grok-4.5",
+            "input": "hello",
+            "reasoning": {
+                "effort": "high",
+                "summary": "auto",
+                "context": "all_turns",
+            },
+        },
+        endpoint="/responses",
+        available_models=[*MODELS, "grok-4.5"],
+    )
+    assert payload["reasoning"] == {"effort": "high"}
 
 
 def test_chat_completions_nested_function_schema_is_sanitized() -> None:
@@ -217,6 +240,14 @@ def test_codex_tool_variants_are_bridged_bidirectionally() -> None:
                         }
                     ],
                 },
+                {
+                    "type": "agent_message",
+                    "author": "/root/child",
+                    "recipient": "/root",
+                    "content": [
+                        {"type": "encrypted_content", "encrypted_content": "CHILD_OK"}
+                    ],
+                },
             ],
         },
         endpoint="/responses",
@@ -241,6 +272,11 @@ def test_codex_tool_variants_are_bridged_bidirectionally() -> None:
     assert payload["input"][4]["name"] == "tool_search"
     assert payload["input"][5]["type"] == "function_call_output"
     assert "browser__open" in payload["input"][5]["output"]
+    assert payload["input"][6] == {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "CHILD_OK"}],
+    }
     assert adaptation.tool_bridge.custom_tool_names == ("apply_patch",)
     assert adaptation.tool_bridge.tool_search is True
 
@@ -276,7 +312,7 @@ def test_codex_tool_variants_are_bridged_bidirectionally() -> None:
             "id": "fc_ns",
             "call_id": "call_ns",
             "name": "collaboration__spawn_agent",
-            "arguments": '{"task":"review"}',
+            "arguments": '{"timeout_ms":60000.0,"nested":[1.0,1.5]}',
             "status": "completed",
         },
     }
@@ -286,6 +322,21 @@ def test_codex_tool_variants_are_bridged_bidirectionally() -> None:
     assert namespaced["type"] == "function_call"
     assert namespaced["namespace"] == "collaboration"
     assert namespaced["name"] == "spawn_agent"
+    assert json.loads(namespaced["arguments"]) == {
+        "timeout_ms": 60000,
+        "nested": [1, 1.5],
+    }
+
+    arguments_done = transform_xai_response_payload(
+        {
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_ns",
+            "call_id": "call_ns",
+            "arguments": '{"timeout_ms":10000.0}',
+        },
+        adaptation.tool_bridge,
+    )
+    assert arguments_done["arguments"] == '{"timeout_ms":10000}'
 
     search_event = {
         "type": "response.output_item.done",
@@ -356,7 +407,12 @@ def test_xai_never_receives_unsupported_codex_tool_enums() -> None:
                     ],
                 },
                 {"type": "tool_search"},
-                {"type": "web_search_preview"},
+                {
+                    "type": "web_search",
+                    "external_web_access": True,
+                    "indexed_web_access": True,
+                    "search_content_types": ["text", "image"],
+                },
                 {"type": "future_client_tool", "name": "future", "parameters": {}},
                 {"type": "unknown_without_name"},
             ],
@@ -370,6 +426,9 @@ def test_xai_never_receives_unsupported_codex_tool_enums() -> None:
         "code_interpreter", "mcp", "shell",
     }
     assert {tool["type"] for tool in payload["tools"]} <= allowed
+    assert [tool for tool in payload["tools"] if tool["type"] == "web_search"] == [
+        {"type": "web_search"}
+    ]
     assert {tool.get("name") for tool in payload["tools"] if tool["type"] == "function"} == {
         "apply_patch", "apps__read", "tool_search", "future"
     }

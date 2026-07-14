@@ -1,6 +1,6 @@
 services:
   gateway:
-    image: ghcr.io/ccawmiku/hermes-supergrok-gateway:v1.0.3
+    image: ghcr.io/ccawmiku/hermes-supergrok-gateway:v1.0.4
     container_name: hermes-supergrok-gateway
     restart: unless-stopped
     ports:
